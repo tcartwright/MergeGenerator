@@ -1,0 +1,599 @@
+﻿
+function WriteFile ([System.Text.StringBuilder]$sb, [string]$fileName){
+    $sb.ToString() | Out-File $fileName -Append -Encoding utf8 -NoNewline | Out-Null
+    $sb.Clear()
+}
+function GetByteString([Byte[]]$bytes) {
+    #TIM C: I am not sure this is the proper way to do this, but it seems to work in all the test cases I throw at it.    
+    $byteStr = [System.BitConverter]::ToString($bytes).Replace("-", "")
+    return "0x$byteStr"; 
+}  
+
+function GetColumnValueFormat ([string] $DataType, [string] $ColumnName, [switch]$ReplaceDollarSignsInValues = $false) {
+    #TIM C: constructing the proper format of these is a PITA. Its best to copy the result into a another powershell window to check the syntax
+    $value = "`$(switch(`$reader.IsDBNull(`$reader.GetOrdinal(`"$ColumnName`"))){`$true{`"NULL`"}`$false{%%FALSE_PART%%}})";
+    #`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`"))
+    switch ($dataType) {
+        { @("bigint", "numeric", "smallint", "decimal", "smallmoney", "int", "tinyint", "money", "float", "real") -icontains $_ } { 
+            $value = ($value -replace "%%FALSE_PART%%", "`"`$(`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`")))`""); 
+            break; 
+        }
+        # https://docs.microsoft.com/en-us/dotnet/standard/base-types/standard-date-and-time-format-strings#Roundtrip  cannot use O,o as it will not cast to a datetime
+        "datetime" { 
+            $value = ($value -replace "%%FALSE_PART%%", "`"'`$(`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`")).ToString(`"yyyy-MM-ddTHH:mm:ss.fff`"))'`""); 
+            break; 
+        }
+        "datetime2" { 
+            $value = ($value -replace "%%FALSE_PART%%", "`"'`$(`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`")).ToString(`"yyyy-MM-ddTHH:mm:ss.fffffff`"))'`""); 
+            break; 
+        }
+        "time" { 
+            $value = ($value -replace "%%FALSE_PART%%", "`"'`$(`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`")).ToString(`"G`"))'`""); 
+            break; 
+        }
+        "bit" { 
+            $value = ($value -replace "%%FALSE_PART%%", "switch (`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`"))){`$true{ 1 }`$false{ 0 }}");
+            break; 
+        }
+        { @("rowversion", "timestamp" ) -icontains $_ } { 
+            throw "You cannot include a timestamp or rowversion column in the values. Please remove column [$ColumnName] from the select list.";
+            break; 
+        }
+        { @("binary", "varbinary", "image" ) -icontains $_ } { 
+            $value = ($value -replace "%%FALSE_PART%%", "`$(GetByteString(`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`"))))");
+            break; 
+        }
+        #treat anything else as a string on the safe side.
+        default { 
+            # we are replacing dollar signs '$' with $(dollar) as they are special to both powershell and sqlcmd. The generated sql cmd file will have a variable to translate them back
+            # also replacing ' with '' to be valid sql
+            $dollarSignReplace = ""
+            if ($ReplaceDollarSignsInValues.IsPresent) {
+                $dollarSignReplace = ".Replace(`"$`", '`$(dollar)')"
+            }
+            $value = ($value -replace "%%FALSE_PART%%", "`"'`$(`$reader.GetValue(`$reader.GetOrdinal(`"$ColumnName`")).ToString().Replace(`"'`", `"''`")$dollarSignReplace)'`""); 
+            break; 
+        }
+    }
+
+    return $value;
+}
+
+function GetColumnInfo ([System.Data.Common.DbDataReader]$reader, [switch]$ReplaceDollarSignsInValues = $false) {
+    $private:columnNames = New-Object Collections.Generic.List[pscustomobject];
+    $private:columnFormat = New-Object System.Text.StringBuilder;
+
+    $private:prefix = "";
+    $private:skipDataTypes = @( "rowversion", "timestamp" );
+
+    for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+        $columnName = $reader.GetName($i)
+        $dataTypeName = $reader.GetDataTypeName($i)
+
+        if ( $skipDataTypes -icontains $dataTypeName ) { continue; }
+
+        [void]$columnNames.Add([pscustomobject]@{ ColumnName = "[$columnName]"; DataType = $dataTypeName } );
+
+        # running a series of switch statements is MUCH faster than calling the GetColumnValue function over and over
+        $colFormat = GetColumnValueFormat -DataType ($dataTypeName) -ColumnName ($columnName) -ReplaceDollarSignsInValues:$ReplaceDollarSignsInValues.IsPresent
+
+        [void]$columnFormat.Append("$prefix$($colFormat)");
+        $prefix = ", "
+    }
+
+    #return multiple values from this function as an array. the columnNames MUST be prefixed with the , so it returns as an list (array)
+    , $columnNames;
+    $columnFormat.ToString();
+}
+
+function GetSqlConnection(
+    [parameter(Mandatory = $true, ParameterSetName = "ConnectionInfo")]
+    [String]$ServerInstance,
+    [parameter(Mandatory = $true, ParameterSetName = "ConnectionInfo")]
+    [String]$Database,
+    [parameter(ParameterSetName = "ConnectionInfo")]
+    [String]$Username = $null,
+    [parameter(ParameterSetName = "ConnectionInfo")]
+    [SecureString]$Password = $null) {
+        
+    # connection
+    $private:SqlConnection = New-Object System.Data.SqlClient.SqlConnection;
+    if (![string]::IsNullOrWhiteSpace($Username)) {
+        $SqlConnection.ConnectionString = "Server=$ServerInstance;Database=$database;Password=$Password;User ID=$Username;";
+    }
+    else {
+        $SqlConnection.ConnectionString = "Server=$ServerInstance;Database=$database;Integrated Security=True";
+    }
+    $SqlConnection.Open();
+
+    return $SqlConnection;
+}
+<#
+.SYNOPSIS
+Gets the ON clause for a table. By default this is just the primary key columns.
+
+.DESCRIPTION
+Gets the ON clause for a table. By default this is just the primary key columns.
+
+.PARAMETER SqlConnection
+Existing sql connection to use for merge statement generation. Either this must be passed in, or ServerInstance, Database must be passed in
+
+.PARAMETER ServerInstance
+The server instance to connect to
+
+.PARAMETER Database
+The database to connect to
+
+.PARAMETER Username
+The user name to use when connecting, if missing, then a trusted connection will be used.
+
+.PARAMETER Password
+The password for the connection, must be passed if UserName is passed
+
+.PARAMETER TableSchema
+The schema for the table
+
+.PARAMETER TableName
+The table name to get the ON clause for
+
+.PARAMETER AllColumns
+IF present, then all columns from the table will be included to the ON clause, except for rowversion/timestamp columns
+
+.PARAMETER ExcludeColumns
+If the AllColumns switch is present, then you can pass in columns to exclude from the ON clause here
+
+.PARAMETER Indentation 
+Allows for extra indentation to be added before the output query
+
+.EXAMPLE
+An example
+
+.NOTES
+General notes
+#>
+function Get-TableOnClause(    
+    [parameter(Mandatory = $true, ParameterSetName = "Connection")]
+    [System.Data.SqlClient.SqlConnection]$SqlConnection,
+    [parameter(Mandatory = $true, ParameterSetName = "ConnectionInfo")]
+    [String]$ServerInstance,
+    [parameter(Mandatory = $true, ParameterSetName = "ConnectionInfo")]
+    [String]$Database,
+    [parameter(ParameterSetName = "ConnectionInfo")]
+    [String]$Username = $null,
+    [parameter(ParameterSetName = "ConnectionInfo")]
+    [SecureString]$Password = $null,
+    [ValidateNotNullOrEmpty()]
+    [String]$TableSchema = "dbo",
+    [ValidateNotNullOrEmpty()]
+    [String]$TableName,
+    [switch]$AllColumns,
+    [String[]]$ExcludeColumns,
+    [String]$Indentation) {
+
+    if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
+        $ParameterList = (Get-Command -Name $MyInvocation.InvocationName).Parameters;
+        foreach ($key in $ParameterList.keys) {
+            $var = Get-Variable -Name $key -ErrorAction SilentlyContinue;
+            if ($var) {
+                Write-Verbose "$($var.name) >= $($var.value)"
+            }
+        }    
+    }
+
+    if ($AllColumns.IsPresent) {
+        if ($ExcludeColumns -and $ExcludeColumns.Count -gt 0) {
+            $excludes = "AND c.name NOT IN ('$([string]::Join("', '", $ExcludeColumns))')"
+        }
+        $query = "SELECT STUFF((SELECT CHAR(10) + CHAR(9) + '$($Indentation)AND target.[' + c.name + '] = source.[' + c.name + ']'
+            FROM sys.columns c
+            INNER JOIN sys.types t ON t.system_type_id = c.system_type_id AND t.user_type_id = c.user_type_id
+            WHERE c.object_id = OBJECT_ID('[$TableSchema].[$TableName]')
+                AND t.name NOT IN ('timestamp', 'rowversion') 
+                $excludes
+            FOR XML PATH('')), 1, 6, '')"
+    }
+    else {
+        $query = "SELECT STUFF((SELECT CHAR(10) + CHAR(9) + '$($Indentation)AND target.[' + c.name + '] = source.[' + c.name + ']'
+            FROM sys.key_constraints kc 
+            INNER JOIN sys.index_columns ic ON ic.object_id = kc.parent_object_id AND kc.unique_index_id = ic.index_id
+            INNER JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE kc.parent_object_id = OBJECT_ID('[$TableSchema].[$TableName]') AND kc.type = 'PK'
+            FOR XML PATH('')), 1, 6, '')"
+    }   
+
+    try {
+        $private:closeConnection = $false
+        $private:connection = $null
+
+        if ($null -eq $SqlConnection) {
+            $connection = GetSqlConnection -ServerInstance $ServerInstance -Database $Database -Username $Username -Password $Password
+            $closeConnection = $true
+        }
+        else {
+            $connection = $SqlConnection
+        }
+
+        $private:sqlCmd = $connection.CreateCommand();
+        $sqlCmd.CommandType = [System.Data.CommandType]::Text;
+        $sqlCmd.CommandText = $query;
+
+        return [string]$sqlCmd.ExecuteScalar()
+    }
+    finally {
+        if ($closeConnection -and $connection) {
+            $connection.Dispose();
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+This function can be used to generate merge statements from queries
+
+.DESCRIPTION
+This function can be used to generate merge statements from queries
+
+.PARAMETER SqlConnection
+Existing sql connection to use for merge statement generation. Either this must be passed in, or ServerInstance, Database must be passed in
+
+.PARAMETER ServerInstance
+The server instance to connect to
+
+.PARAMETER Database
+The database to connect to
+
+.PARAMETER Username
+The user name to use when connecting, if missing, then a trusted connection will be used.
+
+.PARAMETER Password
+The password for the connection, must be passed if UserName is passed
+
+.PARAMETER DestinationSchemaName
+The destination schema for the table to merge into
+
+.PARAMETER DestinationTableName
+The destination table name for the table to merge into
+
+.PARAMETER SourceJoins
+Additional joins that can be added to the source table to pull in extra data
+
+.PARAMETER OnClause
+The ON clause used by the MERGE statement to determine INSERT/UPDATE/DELETE. Can be generated using the function Get-TableOnClause. 
+The two tables will be aliased as [source] and [target]. If not passed in, then the the default ON clause will be generated.
+
+.PARAMETER SourceQuery
+The source query used to generate the source data for the MERGE
+
+.PARAMETER GenerateDeleteClause
+If present the delete clause will be added for the MERGE
+
+.PARAMETER IdentityInsert
+IF present, then IDENTITY INSERT will be enabled for the duration of the MERGE
+
+.PARAMETER OutputIdentity
+If present, the old and possibly new identity will be output to a table variable. To use this functionality, the old identity value must be 
+aliased as original_identity. Then the table variable can be used in subsequent queries to join with. You would use the SourceJoins clause to 
+join to the original_identity and then use the new identity in the merge.
+
+.PARAMETER IdentityField
+The name of the identity field on the table
+
+.PARAMETER FieldReplacements
+These field replacements are used in combination with the SourceJoins and OutputIdentity properties. Allows the replacement of fields to be 
+remapped from the source table to the join table in the SourceJoins clause
+
+.PARAMETER DisableEnableTriggers
+If present, then all of the triggers on the table will be disable for the duration of the MERGE
+
+.PARAMETER WrapGoStatements
+If present, then GO statements will be wrapped around the entire MERGE
+
+.PARAMETER ReplaceDollarSignsInValues
+SQLCMD, and PowerShell both consider the dollar sign as special syntax. If present then the $ will be replaced with $(dollar) so as not to cause syntax errors.
+Must be translated back to a pure $ before execution. If this is on, then this line: ":setvar dollar $" must be present in the SQLCMD file
+
+.PARAMETER Indentation 
+Allows for extra indentation to be added before the output query
+
+.PARAMETER OutPutFileName
+If supplied the output of the merge will go to this file instead of the host output. Large query results can lead to out of memory exceptions if writing to the host output.
+
+.EXAMPLE
+An example
+
+.NOTES
+General notes
+#>
+function Get-MergeStatement (
+    [parameter(Mandatory = $true, ParameterSetName = "Connection")]
+    [System.Data.SqlClient.SqlConnection]$SqlConnection,
+    [parameter(Mandatory = $true, ParameterSetName = "ConnectionInfo")]
+    [String]$ServerInstance,
+    [parameter(Mandatory = $true, ParameterSetName = "ConnectionInfo")]
+    [String]$Database,
+    [parameter(ParameterSetName = "ConnectionInfo")]
+    [String]$Username = $null,
+    [parameter(ParameterSetName = "ConnectionInfo")]
+    [SecureString]$Password = $null,
+    [ValidateNotNullOrEmpty()]
+    [String]$DestinationSchemaName = "dbo",
+    [ValidateNotNullOrEmpty()]
+    [String]$DestinationTableName,
+    [String]$SourceJoins,
+    [String]$OnClause,
+    [ValidateNotNullOrEmpty()]
+    [String]$SourceQuery,
+    [switch]$GenerateDeleteClause,
+    [switch]$IdentityInsert = $false,
+    [switch]$OutputIdentity = $false,
+    [string]$IdentityField = $null,
+    [string[]]$FieldReplacements = $null,
+    [switch]$DisableEnableTriggers = $false,
+    [switch]$WrapGoStatements = $false,
+    [switch]$ReplaceDollarSignsInValues = $false,
+    [string]$Indentation = "",
+    [string]$OutPutFileName
+) {
+
+    if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
+        $ParameterList = (Get-Command -Name $MyInvocation.InvocationName).Parameters;
+        foreach ($key in $ParameterList.keys) {
+            $var = Get-Variable -Name $key -ErrorAction SilentlyContinue;
+            if ($var) {
+                Write-Verbose "$($var.name) >= $($var.value)"
+            }
+        }    
+    }
+    try {
+        if ($OutputIdentity.IsPresent -and $IdentityInsert.IsPresent) {
+            throw "The fields (`$OutputIdentity) or (`$IdentityInsert) should not be combined together. Please use one or the other technique."
+            return $null
+        }
+        if (($OutputIdentity.IsPresent -or $IdentityInsert.IsPresent) -and !($IdentityField)) {
+            throw "The (`$IdentityField) parameter must be supplied when (`$OutputIdentity) or (`$IdentityInsert) is turned on."
+            return $null
+        }
+        if ($OutputIdentity.IsPresent -and $SourceQuery -notmatch "original_identity") {
+            throw "The identity field in the source columns must be aliased as [original_identity] when using a table variable to output the indentity field (`$OutputIdentity)."
+            return $null
+        }
+        if ($OutputIdentity.IsPresent -and $WrapGoStatements.IsPresent) {
+            throw "You cannot both append GO statements (`$WrapGoStatements) and output the identity table variable (`$OutputIdentity) as the table variable will not be available after the GO."
+            return $null
+        }
+        if (!$SqlConnection -and (!$ServerInstance -and !$database)) {
+            throw "You must either pass in `$SqlConnection or both the `$ServerInstance and `$database."
+            return $null
+        }
+        $useOutFile = !([string]::IsNullOrWhiteSpace($OutPutFileName));
+        if ($useOutFile) {
+            #overwrite the file, even if exists
+            "" | Out-File $OutPutFileName -Force -Encoding utf8 -NoNewline | Out-Null      
+        }
+        
+        $private:objectName = "[$DestinationSchemaName].[$DestinationTableName]" 
+        $private:closeConnection = $false
+        $private:connection = $null
+
+        if ($null -eq $SqlConnection) {
+            $connection = GetSqlConnection -ServerInstance $ServerInstance -Database $Database -Username $Username -Password $Password
+            $closeConnection = $true
+        }
+        else {
+            $connection = $SqlConnection
+        }
+        [System.Diagnostics.Stopwatch] $sw = [System.Diagnostics.Stopwatch]::StartNew();
+        if ([string]::IsNullOrWhiteSpace($OnClause)) {
+            $OnClause = Get-TableOnClause -SqlConnection $connection -TableSchema $DestinationSchemaName -TableName $DestinationTableName -Indentation $Indentation        
+        }
+
+        # command 
+        $private:sqlCmd = $connection.CreateCommand();
+        $sqlCmd.CommandType = [System.Data.CommandType]::Text;
+        $sqlCmd.CommandText = $SourceQuery;
+
+        #using a datareader as the invoke-sqlcmd will truncate large data types, unless setting MaxCharLength, and or MaxBinaryLength
+        # then it can run out of memory if the result set is very large
+        $private:reader = $sqlCmd.ExecuteReader();
+
+        Write-Verbose "`tQuery done: $($sw.Elapsed.ToString()) "
+        $sw.Restart();
+
+        [System.Text.StringBuilder] $resultQuery = New-Object System.Text.StringBuilder;
+
+        if ($WrapGoStatements.IsPresent) {
+            [void]$resultQuery.AppendLine("GO");
+        }
+
+        if (!$reader.HasRows) {
+            $sw.Stop()
+            Write-Host "The query for table $objectName has returned 0 rows."
+            return $null
+        }
+
+        #make the query flat so we can write it out 
+        $private:query = $SourceQuery -replace "`r|`n|[ `t]+?", " "
+        do { 
+            $len = $query.Length 
+            $query = $query -replace "  ", " "
+
+        } while ($len -ne $query.Length)
+
+        [void]$resultQuery.AppendLine("$($Indentation)/*********************************************************************************************/;")
+        [void]$resultQuery.AppendLine("$($Indentation)RAISERROR ('***MERGING ROW(S) FOR $objectName', 0, 1) WITH NOWAIT;");
+        [void]$resultQuery.AppendLine("$($Indentation)/* SOURCE QUERY: $query */");
+        [void]$resultQuery.AppendLine("$($Indentation)/*********************************************************************************************/;")
+
+        $columnInfo = GetColumnInfo -Reader $reader -ReplaceDollarSignsInValues:$ReplaceDollarSignsInValues.IsPresent;
+        $columnList = $columnInfo[0]
+        $columnFormat = $columnInfo[1]
+
+        $columnFormat = "{
+            Param ([System.Data.Common.DbDataReader]`$reader)
+            return `"$columnFormat`"
+        }";
+        #create an executable script block from the format string 
+        $rowDataFunc = Invoke-Command -ScriptBlock ([Scriptblock]::Create($columnFormat)) 
+
+        if ($DisableEnableTriggers.IsPresent) {
+            [void]$resultQuery.AppendLine("$($Indentation)DISABLE TRIGGER ALL ON $objectName;");
+        }
+        if ($IdentityInsert.IsPresent) { 
+            [void]$resultQuery.AppendLine("$($Indentation)SET IDENTITY_INSERT $objectName ON;"); 
+        } 
+        if ($IdentityField -and $OutputIdentity.IsPresent) {
+            [void]$resultQuery.AppendLine("$($Indentation)DECLARE @$($DestinationSchemaName)_$($DestinationTableName) TABLE ([original_identity] INT, [$IdentityField] INT, [action] varchar(20))");
+        }
+
+        [void]$resultQuery.AppendLine("`r`n$($Indentation)MERGE $objectName as [target]");
+        [void]$resultQuery.AppendLine("$($Indentation)USING (VALUES");
+
+        if ($useOutFile) {
+            WriteFile -sb $resultQuery -fileName $OutPutFileName
+        }
+
+        $prefix = ""
+        $rowCount = 0;
+        while ($reader.Read()) {
+            $rowData = $rowDataFunc.Invoke($reader);
+            [void]$resultQuery.AppendLine("$($Indentation)`t$prefix($rowData)");   
+            if ($prefix.Length -eq 0) {
+                $prefix = ","
+            } 
+            if ($useOutFile -and $rowCount -gt 0 -and $rowCount % 1000 -eq 0) {
+                WriteFile -sb $resultQuery -fileName $OutPutFileName
+            }
+            $rowCount++;
+        }
+
+        if ($useOutFile) {
+            WriteFile -sb $resultQuery -fileName $OutPutFileName
+        }
+
+        # build up all the column strings from the column list
+        $i = 1
+        $insertPrefix = $updatePrefix = "$($Indentation)"
+        $updateComparePrefix = ""
+        #these types cannot be compared and should not generate comparisons for the update statement
+        $private:skipCompareTypes = @("text", "ntext", "image", "xml")
+        foreach ($column in $columnList) {
+            $columnName = $column.ColumnName
+            if ($columnName -ieq "[original_identity]") { continue; }
+
+            $fields += "$($updatePrefix)$columnName"
+            $insertFields += "$($insertPrefix)$columnName"
+            $insertList += "$($insertPrefix)source.$columnName"        
+
+            if ($columnName -ine "[$IdentityField]") {
+                if ($skipCompareTypes -inotcontains $column.DataType) {
+                    $updateCompare += "$updateComparePrefix OR source.$columnName <> target.$columnName"
+                }
+                $updateList += "$($updatePrefix)$columnName = source.$columnName"
+            } 
+            
+            $insertPrefix = $updatePrefix = ", "
+            $updateComparePrefix = ""
+            if ($i++ % 2 -eq 0) {
+                $insertPrefix = ", `r`n`t`t$($Indentation)"
+                $updateComparePrefix = "`r`n`t`t`t`t$($Indentation)"
+                $updatePrefix = ", `r`n`t$($Indentation)"
+            }
+        }
+
+        if ($updateList.StartsWith(",")) {
+            $updateList = "$Indentation$($updateList.Substring(2))"
+        }
+        #strip off the first OR
+        if ($updateCompare.StartsWith(" OR ")) {
+            $updateCompare = $updateCompare.Substring(4)
+        }
+
+        if ($FieldReplacements) {
+            $GetColumnName = { 
+                Param ([string]$colName)
+                if ($matches) { $matches.Clear() }
+                $colName -match "\]?[^.]*\]?\.\[?([^.\[\]]*)\]?" > $null; 
+                switch ($matches.Count -gt 0 ) { 
+                    $true { $matches[1] } 
+                    $false { throw "The field replacement (`"$colName`") is in an invalid format. It must be in the pattern of alias.ColumnName." }
+                }
+            }
+
+            foreach ($fr in $FieldReplacements) {
+                $column_name = $GetColumnName.Invoke($fr);
+                $updateList = $updateList -ireplace "(?i:)\[?source\]?\.\[$column_name\]", $fr
+                $insertList = $insertList -ireplace "(?i:)\[?source\]?\.\[$column_name\]", $fr
+            }
+        }
+
+        [void]$resultQuery.AppendLine("$($Indentation)) AS [source] (");
+        [void]$resultQuery.AppendLine("`t$($fields)");
+        [void]$resultQuery.AppendLine("$($Indentation))");
+        if ($SourceJoins) {
+            [void]$resultQuery.AppendLine("$($Indentation)$SourceJoins");
+        }
+        [void]$resultQuery.AppendLine("$($Indentation)ON ($OnClause)");
+        [void]$resultQuery.AppendLine("$($Indentation)WHEN MATCHED AND ($updateCompare) THEN"); 
+        [void]$resultQuery.AppendLine("$($Indentation)`tUPDATE SET"); 
+        [void]$resultQuery.AppendLine("`t$updateList");
+        [void]$resultQuery.AppendLine("$($Indentation)WHEN NOT MATCHED BY TARGET THEN"); 
+        [void]$resultQuery.AppendLine("$($Indentation)`tINSERT (");
+        [void]$resultQuery.AppendLine("`t`t$insertFields");
+        [void]$resultQuery.AppendLine("$($Indentation)`t) VALUES (");
+        [void]$resultQuery.AppendLine("`t`t$insertList");
+        
+        if ($useOutFile) {
+            WriteFile -sb $resultQuery -fileName $OutPutFileName
+        }
+
+        $ending = ""
+        if ($IdentityField -and $OutputIdentity.IsPresent) {
+            $ending = "`t)`r`nOUTPUT source.[original_identity], inserted.[$IdentityField], `$action`r`n";
+            $ending += "INTO @$($DestinationSchemaName)_$($DestinationTableName)";
+        }
+        else {
+            $ending = "`t)";
+        }
+
+        if ($GenerateDeleteClause.IsPresent) {
+            $ending += "`r`nWHEN NOT MATCHED BY SOURCE THEN DELETE"; 
+        }
+        [void]$resultQuery.AppendLine("$($Indentation)$ending;`r`n");
+
+        #[void]$resultQuery.AppendLine("IF @@ERROR <> 0 SET NOEXEC ON;");
+        if ($IdentityInsert.IsPresent) { 
+            [void]$resultQuery.AppendLine("$($Indentation)SET IDENTITY_INSERT $objectName OFF;"); 
+        }
+        if ($DisableEnableTriggers.IsPresent) {
+            [void]$resultQuery.AppendLine("$($Indentation)ENABLE TRIGGER ALL ON $objectName;`r`n");
+        }
+        if ($WrapGoStatements.IsPresent) {
+            [void]$resultQuery.AppendLine("GO");
+        }
+
+        [void]$resultQuery.AppendLine("$($Indentation)/*********************************************************************************************/;")
+        [void]$resultQuery.AppendLine("$($Indentation)RAISERROR ('***MERGING ($('{0:N0}' -f $rowCount)) ROW(S) FOR $objectName COMPLETE', 0, 1) WITH NOWAIT;");
+        [void]$resultQuery.AppendLine("$($Indentation)/*********************************************************************************************/;")
+
+        $sw.Stop()
+        Write-Verbose "`tMerge generation done: $($sw.Elapsed.ToString())"
+
+        if ($useOutFile) {
+            WriteFile -sb $resultQuery -fileName $OutPutFileName
+            return "Done: $OutPutFileName"
+        }
+        else {
+            return $resultQuery.ToString();
+        }
+
+    }
+    finally {
+        if ($reader) { $reader.Close(); }
+        if ($sqlCmd) { $sqlCmd.Dispose(); }
+        if ($connection -and $closeConnection) { $connection.Dispose(); }
+    }
+}
+
+Export-ModuleMember -Function "Get-*"
+Export-ModuleMember -Function "Save-*"
+Export-ModuleMember -Function "Invoke-*"

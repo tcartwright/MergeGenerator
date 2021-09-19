@@ -1,0 +1,68 @@
+﻿
+function GenMerge (
+    [parameter(Mandatory = $true)]
+    [String]$Server,
+    [parameter(Mandatory = $true)]
+    [String]$dbName,
+    [parameter()]
+    [String]$user = $null,
+    [parameter()]
+    [SecureString]$pwd = $null,
+    [ValidateNotNullOrEmpty()]
+    [parameter(Mandatory = $true)]
+    [String]$TargetSchema = "dbo",
+    [ValidateNotNullOrEmpty()]
+    [parameter(Mandatory = $true)]
+    [String]$TargetTable,
+    [String]$Joins,
+    [String]$On,
+    [ValidateNotNullOrEmpty()]
+    [parameter(Mandatory = $true)]
+    [String]$Query,
+    [switch]$GenDeleteClause,
+    [switch]$IdentInsert = $false,
+    [switch]$OutputIdent = $false,
+    [string]$IdentField = $null,
+    [string[]]$FieldReps = $null,
+    [switch]$TurnOffOnTriggers = $false,
+    [switch]$WrapGos = $false,
+    [switch]$ReplaceDollarSigns = $false,
+    [string]$Indent = "",
+    [string]$OutFile,
+    [switch]$AllColumns,
+    [string[]]$ExcludeColumns
+) {
+    #$Host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ([int]::MaxValue, 0)
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($On) -or $AllColumns)
+        {
+            $On = Get-TableOnClause -ServerInstance $Server -Database $dbName -TableName $TargetTable -AllColumns:$AllColumns -ExcludeColumns $ExcludeColumns
+        }
+
+        $mergeSql = Get-MergeStatement -ServerInstance $Server `
+            -Database $dbName `
+            -Username $user `
+            -Password $pwd `
+            -DestinationSchemaName $TargetSchema `
+            -DestinationTableName $TargetTable `
+            -SourceJoins $Joins `
+            -OnClause $On `
+            -SourceQuery $Query `
+            -GenerateDeleteClause:$GenDeleteClause `
+            -IdentityInsert:$IdentInsert `
+            -OutputIdentity:$OutputIdent `
+            -IdentityField $IdentField `
+            -FieldReplacements $FieldReps `
+            -DisableEnableTriggers:$TurnOffOnTriggers `
+            -WrapGoStatements:$WrapGos `
+            -Indentation:$Indent `
+            -OutPutFileName $OutFile 
+    }
+    catch {
+        throw;
+    }
+    return $mergesql
+}
+
+

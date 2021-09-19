@@ -1,0 +1,42 @@
+﻿# This module can be located in the same directory of the MergeGenerator.exe application. 
+# The script module either needs to be installed as a module, or in the same directory as this script.
+Import-Module "$PSScriptRoot\MergeGenerator.psm1" -DisableNameChecking -Force
+
+$server = "#ServerInstance#"
+$db = "#Database#"
+$schema = "#DestinationSchemaName#"
+$table = "#DestinationTableName#"
+$OnClause = "#OnClause#"
+$query = "#SourceQuery#"
+$AllColumns = #AllColumns#
+
+if ([string]::IsNullOrWhiteSpace($OnClause) -or $AllColumns) {
+    $OnClause = Get-TableOnClause -ServerInstance $server `
+        -Database $db `
+        -TableSchema $schema `
+        -TableName $table `
+        -AllColumns: $AllColumns `
+        -ExcludeColumns #ExcludeColumns#
+}
+
+$mergeSql = Get-MergeStatement -ServerInstance $server `
+    -Database $db `
+    -Username $null `
+    -Password $null `
+    -DestinationSchemaName $schema `
+    -DestinationTableName $table `
+    -SourceJoins "#SourceJoins#" `
+    -OnClause $OnClause `
+    -SourceQuery $query `
+    -GenerateDeleteClause: #GenerateDeleteClause# `
+    -IdentityInsert: #IdentityInsert# `
+    -OutputIdentity: #OutputIdentity# `
+    -IdentityField "#IdentityField#" `
+    -FieldReplacements #FieldReplacements# `
+    -DisableEnableTriggers: #DisableEnableTriggers# `
+    -WrapGoStatements: #WrapGoStatements# `
+    -ReplaceDollarSignsInValues: $false `
+    -Indentation "#Indentation#" `
+    -OutPutFileName $null
+    
+Write-Host $mergeSql
