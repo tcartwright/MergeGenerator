@@ -1,4 +1,58 @@
-﻿
+﻿Add-Type -AssemblyName System.Data
+<#
+- Have to resolve Microsoft.SqlServer.Types, was getting this exceptions sometimes:
+    Exception calling "GetValue" with "1" argument(s): "Could not load file or assembly 'Microsoft.SqlServer.Types, Version=10.0.0.0, Culture=neutral, 
+    PublicKeyToken=89845dcd8080cc91' or one of its dependencies. The system cannot find the file specified."
+- Also have to use a C# resolver, the PS one was killing PS with a StackOverflow exception
+#>
+
+[System.Reflection.Assembly]::LoadWithPartialName("Microsoft.SqlServer.Types")
+
+# https://newbedev.com/powershell-assembly-binding-redirect-not-found-in-application-configuration-file
+if (!("Redirector" -as [type])) {
+    $source = @'
+        using System;
+        using System.Linq;
+        using System.Reflection;
+        using System.Text.RegularExpressions;
+
+        public class Redirector {
+            public Redirector()
+            {
+                this.AssemblyResolver = new ResolveEventHandler(AssemblyResolve);
+            }
+
+            public readonly ResolveEventHandler AssemblyResolver;
+
+            protected System.Reflection.Assembly AssemblyResolve(object sender, ResolveEventArgs resolveEventArgs)
+            {
+                // Console.WriteLine("Resolver called with {0}", resolveEventArgs.Name);
+                var name = resolveEventArgs.Name.Split(',').FirstOrDefault();
+                var assembly = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => string.Compare(a.GetName().Name, name, true) == 0);
+                if (assembly != null)
+                {
+                    //Console.WriteLine("Redirecting {0} to {1}", resolveEventArgs.Name, assembly.GetName().FullName);
+                }
+                return assembly;
+            }
+        }
+'@
+
+    $type = Add-Type -TypeDefinition $source -PassThru 
+}
+
+try
+{
+    $redirector = [Redirector]::new()
+    [System.AppDomain]::CurrentDomain.add_AssemblyResolve($redirector.AssemblyResolver)
+}
+catch
+{
+    #.net core uses a different redirect method
+    write-warning "Unable to register assembly redirect(s). Are you on ARM (.Net Core)?"
+}
+
+
 function WriteFile ([System.Text.StringBuilder]$sb, [string]$fileName){
     $sb.ToString() | Out-File $fileName -Append -Encoding utf8 -NoNewline | Out-Null
     $sb.Clear()
@@ -394,7 +448,7 @@ function Get-MergeStatement (
 
         #using a datareader as the invoke-sqlcmd will truncate large data types, unless setting MaxCharLength, and or MaxBinaryLength
         # then it can run out of memory if the result set is very large
-        $private:reader = $sqlCmd.ExecuteReader();
+        [System.Data.SqlClient.SqlDataReader]$private:reader = $sqlCmd.ExecuteReader();
 
         Write-Verbose "`tQuery done: $($sw.Elapsed.ToString()) "
         $sw.Restart();
@@ -597,3 +651,5 @@ function Get-MergeStatement (
 Export-ModuleMember -Function "Get-*"
 Export-ModuleMember -Function "Save-*"
 Export-ModuleMember -Function "Invoke-*"
+
+

@@ -44,6 +44,8 @@ namespace MergeGenerator
 
             ResizeDescriptionArea(ref pgOptions, 6);
             _module = Regex.Replace(Resources.MergeGeneratorModule, "Export-ModuleMember.*", "");
+
+            this.Text = $"{this.Text} v{typeof(Form1).Assembly.GetName().Version}";
         }
 
         private bool ResizeDescriptionArea(ref PropertyGrid grid, int lines)
@@ -74,6 +76,13 @@ namespace MergeGenerator
         {
             try
             {
+                if (string.IsNullOrWhiteSpace(txtServer.Text))
+                {
+                    errorProvider1.SetError(txtServer, "Please enter a server name to connect to.");
+                    return;
+                }
+                errorProvider1.Clear();
+
                 if (txtQuery.Text.Length > 0 && MessageBoxEx.Show("You already have a query loaded, do you still wish to re-load the database objects?", "Re-Load",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.No)
                 {
@@ -86,8 +95,6 @@ namespace MergeGenerator
                 cboDatabase.DataSource = _dbs;
                 cboDatabase.ValueMember = cboDatabase.DisplayMember = "database_name";
 
-                Settings.Default.ServerName = txtServer.Text;
-                Settings.Default.Save();
                 SetEnabled(true);
             }
             catch (Exception ex)
@@ -157,7 +164,7 @@ namespace MergeGenerator
 
         private string GetScriptPath(string extension)
         {
-            var fileName = GetValidFileName($"{cboDatabase.Text}_{cboTables.Text}_{DateTime.Now:yyyyMMdd_HHmmss.fff}.{extension}");
+            var fileName = GetValidFileName($"{cboDatabase.Text}_{cboTables.Text}_{DateTime.Now:yyyyMMdd}.{extension}");
             return Path.Combine(txtOutPutFolder.Text, fileName);
         }
 
@@ -340,9 +347,9 @@ namespace MergeGenerator
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
+            Settings.Default.ServerName = txtServer.Text;
             Settings.Default.OutputPath = txtOutPutFolder.Text;
             Settings.Default.Save();
-
         }
 
         private void changeFolderPathToolStripMenuItem_Click(object sender, EventArgs e)
