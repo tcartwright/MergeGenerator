@@ -66,7 +66,7 @@ namespace MergeGenerator
             {
                 if (System.Diagnostics.Debugger.IsAttached)
                 {
-                    MessageBoxEx.Show(error.Message, "ResizeDescriptionArea()");
+                    MessageBoxEx.Show(this, error.Message, "ResizeDescriptionArea()");
                 }
                 return false;
             }
@@ -83,7 +83,7 @@ namespace MergeGenerator
                 }
                 errorProvider1.Clear();
 
-                if (txtQuery.Text.Length > 0 && MessageBoxEx.Show("You already have a query loaded, do you still wish to re-load the database objects?", "Re-Load",
+                if (txtQuery.Text.Length > 0 && MessageBoxEx.Show(this, "You already have a query loaded, do you still wish to re-load the database objects?", "Re-Load",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.No)
                 {
                     return;
@@ -100,7 +100,7 @@ namespace MergeGenerator
             catch (Exception ex)
             {
                 Cursor.Current = Cursors.Default;
-                MessageBoxEx.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBoxEx.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 SetEnabled(false);
             }
             finally
@@ -180,7 +180,7 @@ namespace MergeGenerator
                 File.WriteAllText(path, _mergeOptions.GenerateScript(txtServer.Text, cboDatabase.Text, tbl.schema_name, tbl.table_name, txtQuery.Text));
                 File.WriteAllText(Path.Combine(txtOutPutFolder.Text, "MergeGenerator.psm1"), Resources.MergeGeneratorModule);
 
-                if (MessageBoxEx.Show($"The script was saved to:\r\n\r\n'{path}'\r\n\r\nDo you wish to open this file using {_PSEditorFileName}?", "Saved Script", 
+                if (MessageBoxEx.Show(this, $"The script was saved to:\r\n\r\n'{path}'\r\n\r\nDo you wish to open this file using {_PSEditorFileName}?", "Saved Script", 
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
                 {
                     var pi = new ProcessStartInfo(_PSEditor, $"{path}")
@@ -193,7 +193,7 @@ namespace MergeGenerator
             catch (Exception ex)
             {
                 Cursor.Current = Cursors.Default;
-                MessageBoxEx.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBoxEx.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -263,7 +263,7 @@ namespace MergeGenerator
                         }
                     }
 
-                    if (MessageBoxEx.Show($"The merge script was saved to:\r\n\r\n'{path}'\r\n\r\nDo you wish to open this file using {_SqlEditorFileName}?", "Saved Merge", 
+                    if (MessageBoxEx.Show(this, $"The merge script was saved to:\r\n\r\n'{path}'\r\n\r\nDo you wish to open this file using {_SqlEditorFileName}?", "Saved Merge", 
                         MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
                     {
                         Process.Start(_SqlEditor, path);
@@ -273,7 +273,7 @@ namespace MergeGenerator
             catch (Exception ex)
             {
                 Cursor.Current = Cursors.Default;
-                MessageBoxEx.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBoxEx.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -391,7 +391,7 @@ namespace MergeGenerator
             }
             catch (Exception ex)
             {
-                MessageBoxEx.Show($"Exception opening folder: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBoxEx.Show(this, $"Exception opening folder: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -408,7 +408,7 @@ namespace MergeGenerator
             }
             catch (Exception ex)
             {
-                MessageBoxEx.Show($"Exception creating folder: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBoxEx.Show(this, $"Exception creating folder: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
     }
