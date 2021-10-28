@@ -601,18 +601,16 @@ function Get-MergeStatement (
             WriteFile -sb $resultQuery -fileName $OutPutFileName
         }
 
-        $ending = ""
-        if ($IdentityField -and $OutputIdentity.IsPresent) {
-            $ending = "`t)`r`nOUTPUT source.[original_identity], inserted.[$IdentityField], `$action`r`n";
-            $ending += "INTO @$($DestinationSchemaName)_$($DestinationTableName)";
-        }
-        else {
-            $ending = "`t)";
+        $ending = "`t)"
+        if ($GenerateDeleteClause.IsPresent) {
+            $ending += "`r`nWHEN NOT MATCHED BY SOURCE THEN DELETE"
         }
 
-        if ($GenerateDeleteClause.IsPresent) {
-            $ending += "`r`nWHEN NOT MATCHED BY SOURCE THEN DELETE"; 
+        if ($IdentityField -and $OutputIdentity.IsPresent) {
+            $ending += "`r`nOUTPUT source.[original_identity], inserted.[$IdentityField], `$action`r`n";
+            $ending += "INTO @$($DestinationSchemaName)_$($DestinationTableName)";
         }
+
         [void]$resultQuery.AppendLine("$($Indentation)$ending;`r`n");
 
         #[void]$resultQuery.AppendLine("IF @@ERROR <> 0 SET NOEXEC ON;");
