@@ -9,6 +9,9 @@ $table = "#DestinationTableName#"
 $OnClause = "#OnClause#"
 $query = "#SourceQuery#"
 $AllColumns = #AllColumns#
+$OutputIdentity = #OutputIdentity#
+$IdentityInsert = #IdentityInsert#
+$IdentityField = "#IdentityField#"
 
 if ([string]::IsNullOrWhiteSpace($OnClause) -or $AllColumns) {
     $OnClause = Get-TableOnClause -ServerInstance $server `
@@ -17,6 +20,10 @@ if ([string]::IsNullOrWhiteSpace($OnClause) -or $AllColumns) {
         -TableName $table `
         -AllColumns: $AllColumns `
         -ExcludeColumns #ExcludeColumns#
+
+    if (($OutputIdentity -or $IdentityInsert) -and $Query -imatch "original_identity") {
+        $OnClause = $OnClause -ireplace "\[?source\]?\.\[?$IdentityField\]?", "source.[original_identity]"
+    }
 }
 
 $mergeSql = Get-MergeStatement -ServerInstance $server `
@@ -29,9 +36,9 @@ $mergeSql = Get-MergeStatement -ServerInstance $server `
     -OnClause $OnClause `
     -SourceQuery $query `
     -GenerateDeleteClause: #GenerateDeleteClause# `
-    -IdentityInsert: #IdentityInsert# `
-    -OutputIdentity: #OutputIdentity# `
-    -IdentityField "#IdentityField#" `
+    -IdentityInsert: $IdentityInsert `
+    -OutputIdentity: $OutputIdentity `
+    -IdentityField $IdentityField `
     -FieldReplacements #FieldReplacements# `
     -DisableEnableTriggers: #DisableEnableTriggers# `
     -WrapGoStatements: #WrapGoStatements# `

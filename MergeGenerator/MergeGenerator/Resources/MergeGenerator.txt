@@ -38,6 +38,10 @@ function GenMerge (
         if ([string]::IsNullOrWhiteSpace($On) -or $AllColumns)
         {
             $On = Get-TableOnClause -ServerInstance $Server -Database $dbName -TableName $TargetTable -AllColumns:$AllColumns -ExcludeColumns $ExcludeColumns
+
+            if (($OutputIdent.IsPresent -or $IdentInsert.IsPresent) -and $Query -imatch "original_identity") {
+                $On = $On -ireplace "\[?source\]?\.\[?$IdentField\]?", "source.[original_identity]"
+            }
         }
 
         $mergeSql = Get-MergeStatement -ServerInstance $Server `

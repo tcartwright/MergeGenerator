@@ -19,6 +19,8 @@ namespace MergeGenerator
 {
     public partial class Form1 : Form
     {
+        private readonly char[] _invalidPathChars;
+        private readonly char[] _allowedChars = { '\b', };
         private List<SQLDb> _dbs = null;
         private SQLDb _currentDb = null;
         private MergeOptions _mergeOptions;
@@ -33,6 +35,10 @@ namespace MergeGenerator
         public Form1()
         {
             InitializeComponent();
+
+            var chars = new List<char>() { '!', '@', '#', '%', '^', '&', '*', '{', '}', '?', '~', '`' };
+            chars.AddRange(Path.GetInvalidPathChars());
+            _invalidPathChars = chars.ToArray();
         }
 
         private void Form1_Load(object sender, EventArgs e)

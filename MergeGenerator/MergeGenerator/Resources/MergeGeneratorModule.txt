@@ -400,10 +400,6 @@ function Get-MergeStatement (
         }    
     }
     try {
-        if ($OutputIdentity.IsPresent -and $IdentityInsert.IsPresent) {
-            throw "The fields (`$OutputIdentity) or (`$IdentityInsert) should not be combined together. Please use one or the other technique."
-            return $null
-        }
         if (($OutputIdentity.IsPresent -or $IdentityInsert.IsPresent) -and !($IdentityField)) {
             throw "The (`$IdentityField) parameter must be supplied when (`$OutputIdentity) or (`$IdentityInsert) is turned on."
             return $null
@@ -526,42 +522,46 @@ function Get-MergeStatement (
         }
 
         # build up all the column strings from the column list
-        $i = 1
-        $insertPrefix = $updatePrefix = "$($Indentation)"
-        $updateComparePrefix = ""
+        $fields = New-Object System.Collections.ArrayList
+        $insertFields = New-Object System.Collections.ArrayList
+        $insertList = New-Object System.Collections.ArrayList
+        $updateCompare = New-Object System.Collections.ArrayList
+        $updateList = New-Object System.Collections.ArrayList
+
         #these types cannot be compared and should not generate comparisons for the update statement
         $private:skipCompareTypes = @("text", "ntext", "image", "xml")
         foreach ($column in $columnList) {
             $columnName = $column.ColumnName
-            if ($columnName -ieq "[original_identity]") { continue; }
 
-            $fields += "$($updatePrefix)$columnName"
-            $insertFields += "$($insertPrefix)$columnName"
-            $insertList += "$($insertPrefix)source.$columnName"        
-
-            if ($columnName -ine "[$IdentityField]") {
-                if ($skipCompareTypes -inotcontains $column.DataType) {
-                    $updateCompare += "$updateComparePrefix OR source.$columnName <> target.$columnName"
+            if (($columnName -ieq "[$IdentityField]" -or $columnName -ieq "[original_identity]")) {
+                if ($IdentityInsert.IsPresent) {
+                    $fields.Add("$columnName") | Out-Null
+                    $insertFields.Add("[$IdentityField]") | Out-Null
+                    $insertList.Add("source.$columnName") | Out-Null
                 }
-                $updateList += "$($updatePrefix)$columnName = source.$columnName"
-            } 
-            
-            $insertPrefix = $updatePrefix = ", "
-            $updateComparePrefix = ""
-            if ($i++ % 2 -eq 0) {
-                $insertPrefix = ", `r`n`t`t$($Indentation)"
-                $updateComparePrefix = "`r`n`t`t`t`t$($Indentation)"
-                $updatePrefix = ", `r`n`t$($Indentation)"
+            } else {
+                $fields.Add("$columnName") | Out-Null
+                $insertFields.Add("$columnName") | Out-Null
+                $insertList.Add("source.$columnName") | Out-Null
             }
+
+            if ($columnName -ine "[$IdentityField]" -and $columnName -ine "[original_identity]") {
+                if ($skipCompareTypes -inotcontains $column.DataType) {
+                    $updateCompare.Add("source.$columnName <> target.$columnName") | Out-Null
+                }
+                if ($updateList.Count -eq 0) {
+                    $updateList.Add("$columnName = source.$columnName") | Out-Null
+                } else {
+                    $updateList.Add("$columnName = source.$columnName") | Out-Null
+                }
+            } 
         }
 
-        if ($updateList.StartsWith(",")) {
-            $updateList = "$Indentation$($updateList.Substring(2))"
-        }
-        #strip off the first OR
-        if ($updateCompare.StartsWith(" OR ")) {
-            $updateCompare = $updateCompare.Substring(4)
-        }
+        $fieldsStr = FormatList -list $fields -join ", " -break "`r`n`t$($Indentation)" -prefix "`t$($Indentation)"
+        $insertFieldsStr = FormatList -list $insertFields -join ", " -break "`r`n`t`t$($Indentation)" -prefix "`t`t$($Indentation)"
+        $insertListStr = FormatList -list $insertList -join ", " -break "`r`n`t`t$($Indentation)" -prefix "`t`t$($Indentation)"
+        $updateCompareStr = FormatList -list $updateCompare -join " OR " -break "`r`n`t`t$($Indentation)" -breakCount 1 -prefix ""
+        $updateListStr = FormatList -list $updateList -join ", " -break "`r`n`t`t$($Indentation)" -prefix "`t`t$($Indentation)"
 
         if ($FieldReplacements) {
             $GetColumnName = { 
@@ -576,43 +576,46 @@ function Get-MergeStatement (
 
             foreach ($fr in $FieldReplacements) {
                 $column_name = $GetColumnName.Invoke($fr);
-                $updateList = $updateList -ireplace "(?i:)\[?source\]?\.\[$column_name\]", $fr
-                $insertList = $insertList -ireplace "(?i:)\[?source\]?\.\[$column_name\]", $fr
+                $updateListStr = $updateListStr -ireplace "(?i:)\[?source\]?\.\[$column_name\]", $fr
+                $insertListStr = $insertListStr -ireplace "(?i:)\[?source\]?\.\[$column_name\]", $fr
             }
         }
 
         [void]$resultQuery.AppendLine("$($Indentation)) AS [source] (");
-        [void]$resultQuery.AppendLine("`t$($fields)");
+        [void]$resultQuery.AppendLine("$($fieldsStr)");
         [void]$resultQuery.AppendLine("$($Indentation))");
         if ($SourceJoins) {
             [void]$resultQuery.AppendLine("$($Indentation)$SourceJoins");
         }
         [void]$resultQuery.AppendLine("$($Indentation)ON ($OnClause)");
-        [void]$resultQuery.AppendLine("$($Indentation)WHEN MATCHED AND ($updateCompare) THEN"); 
+        if ($OutputIdentity.IsPresent) {
+            # we must update all rows when this flag is present, else the output table will be empty :|
+            [void]$resultQuery.AppendLine("$($Indentation)WHEN MATCHED THEN"); 
+        } else {
+            [void]$resultQuery.AppendLine("$($Indentation)WHEN MATCHED AND ($updateCompareStr) THEN"); 
+        }
         [void]$resultQuery.AppendLine("$($Indentation)`tUPDATE SET"); 
-        [void]$resultQuery.AppendLine("`t$updateList");
+        [void]$resultQuery.AppendLine("$updateListStr");
         [void]$resultQuery.AppendLine("$($Indentation)WHEN NOT MATCHED BY TARGET THEN"); 
         [void]$resultQuery.AppendLine("$($Indentation)`tINSERT (");
-        [void]$resultQuery.AppendLine("`t`t$insertFields");
+        [void]$resultQuery.AppendLine("$insertFieldsStr");
         [void]$resultQuery.AppendLine("$($Indentation)`t) VALUES (");
-        [void]$resultQuery.AppendLine("`t`t$insertList");
+        [void]$resultQuery.AppendLine("$insertListStr");
         
         if ($useOutFile) {
             WriteFile -sb $resultQuery -fileName $OutPutFileName
         }
 
-        $ending = ""
-        if ($IdentityField -and $OutputIdentity.IsPresent) {
-            $ending = "`t)`r`nOUTPUT source.[original_identity], inserted.[$IdentityField], `$action`r`n";
-            $ending += "INTO @$($DestinationSchemaName)_$($DestinationTableName)";
-        }
-        else {
-            $ending = "`t)";
+        $ending = "`t)"
+        if ($GenerateDeleteClause.IsPresent) {
+            $ending += "`r`nWHEN NOT MATCHED BY SOURCE THEN DELETE"
         }
 
-        if ($GenerateDeleteClause.IsPresent) {
-            $ending += "`r`nWHEN NOT MATCHED BY SOURCE THEN DELETE"; 
+        if ($IdentityField -and $OutputIdentity.IsPresent) {
+            $ending += "`r`nOUTPUT source.[original_identity], inserted.[$IdentityField], `$action`r`n";
+            $ending += "INTO @$($DestinationSchemaName)_$($DestinationTableName)";
         }
+
         [void]$resultQuery.AppendLine("$($Indentation)$ending;`r`n");
 
         #[void]$resultQuery.AppendLine("IF @@ERROR <> 0 SET NOEXEC ON;");
@@ -649,8 +652,25 @@ function Get-MergeStatement (
     }
 }
 
+function FormatList([System.Collections.ArrayList]$list, [string]$prefix, [string]$join, [string]$break, $breakCount = 2) {
+    $ret = New-Object System.Text.StringBuilder
+    $i = 1
+
+    $br = ""
+    foreach ($item in $list) {
+        $br = ""
+        if ($i++ % $breakCount -eq 0) {
+            $br = $break  
+        }
+        $ret.Append("$item$($join)$($br)") | Out-Null
+    }
+    $val = $ret.ToString()
+    $val = $val.Substring(0, $val.Length - $join.Length - $br.Length)
+
+    return "$prefix$val"
+}
+
 Export-ModuleMember -Function "Get-*"
 Export-ModuleMember -Function "Save-*"
 Export-ModuleMember -Function "Invoke-*"
-
 
