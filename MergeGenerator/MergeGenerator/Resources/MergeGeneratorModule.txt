@@ -326,9 +326,8 @@ If present the delete clause will be added for the MERGE
 IF present, then IDENTITY INSERT will be enabled for the duration of the MERGE
 
 .PARAMETER OutputIdentity
-If present, the old and possibly new identity will be output to a table variable. To use this functionality, the old identity value must be 
-aliased as original_identity. Then the table variable can be used in subsequent queries to join with. You would use the SourceJoins clause to 
-join to the original_identity and then use the new identity in the merge.
+If present, the old and possibly new identity will be output to a table variable. Then the table variable can be used in subsequent queries to 
+join with. You would use the SourceJoins clause to join to the original_identity and then use the new identity in the merge.
 
 .PARAMETER IdentityField
 The name of the identity field on the table
@@ -402,10 +401,6 @@ function Get-MergeStatement (
     try {
         if (($OutputIdentity.IsPresent -or $IdentityInsert.IsPresent) -and !($IdentityField)) {
             throw "The (`$IdentityField) parameter must be supplied when (`$OutputIdentity) or (`$IdentityInsert) is turned on."
-            return $null
-        }
-        if ($OutputIdentity.IsPresent -and $SourceQuery -notmatch "original_identity") {
-            throw "The identity field in the source columns must be aliased as [original_identity] when using a table variable to output the indentity field (`$OutputIdentity)."
             return $null
         }
         if ($OutputIdentity.IsPresent -and $WrapGoStatements.IsPresent) {
@@ -533,19 +528,18 @@ function Get-MergeStatement (
         foreach ($column in $columnList) {
             $columnName = $column.ColumnName
 
-            if (($columnName -ieq "[$IdentityField]" -or $columnName -ieq "[original_identity]")) {
+            $fields.Add("$columnName") | Out-Null
+            if (($columnName -ieq "[$IdentityField]")) {
                 if ($IdentityInsert.IsPresent) {
-                    $fields.Add("$columnName") | Out-Null
                     $insertFields.Add("[$IdentityField]") | Out-Null
                     $insertList.Add("source.$columnName") | Out-Null
                 }
             } else {
-                $fields.Add("$columnName") | Out-Null
                 $insertFields.Add("$columnName") | Out-Null
                 $insertList.Add("source.$columnName") | Out-Null
             }
 
-            if ($columnName -ine "[$IdentityField]" -and $columnName -ine "[original_identity]") {
+            if ($columnName -ine "[$IdentityField]") {
                 if ($skipCompareTypes -inotcontains $column.DataType) {
                     $updateCompare.Add("source.$columnName <> target.$columnName") | Out-Null
                 }
@@ -612,7 +606,7 @@ function Get-MergeStatement (
         }
 
         if ($IdentityField -and $OutputIdentity.IsPresent) {
-            $ending += "`r`nOUTPUT source.[original_identity], inserted.[$IdentityField], `$action`r`n";
+            $ending += "`r`nOUTPUT source.[$IdentityField], inserted.[$IdentityField], `$action`r`n";
             $ending += "INTO @$($DestinationSchemaName)_$($DestinationTableName)";
         }
 
